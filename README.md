@@ -2,14 +2,13 @@
 
 > Recruiter-friendly snapshot: this repo builds on the LERF-TOGO research direction with a Gaussian Splatting scene backend, robot-frame alignment tooling, and a working grasp-generation UI for semantic robotic manipulation.
 
-[![Watch the HLOC Gaussian demo](docs/media/hloc_poster.png)](docs/media/flowers_take7_hloc_v3_interp.mp4)
+<p align="center">
+  <img src="docs/media/flowers_take7_hloc_v3_demo.gif" alt="HLOC-initialized Gaussian reconstruction demo" width="820" />
+</p>
 
-**Demo:** [Highest-quality HLOC Gaussian interpolation clip](docs/media/flowers_take7_hloc_v3_interp.mp4)
-**Technical notes:** [handoff](HANDOFF_2026-04-17.md) · [architecture](SOL_CODEBASE_ARCHITECTURE.md) · [SOL training workflow](SOL_TRAINING.md)
-
-![Robot-frame alignment metrics](docs/figures/alignment_metrics.svg)
-![Current system pipeline](docs/figures/repo_pipeline.svg)
-![World-frame Gaussian point cloud used for grasp generation](docs/media/flowers_take7_pointcloud.png)
+<p align="center">
+  <img src="docs/media/flowers_take7_pointcloud.png" alt="World-frame Gaussian point cloud used for grasp generation" width="420" />
+</p>
 
 ## What This Repo Shows
 
@@ -24,7 +23,7 @@
 - Backend abstraction to support both the original LERF/Nerfstudio path and a Gaussian Splatting path from the same UI.
 - Robot-frame alignment workflow for transferring high-quality SfM geometry back into executable robot coordinates.
 - SigLIP 2 embedding worker and scene-query scaffolding for a newer semantic pipeline.
-- SOL-ready training scripts and runbook documentation for remote CUDA training.
+- Remote training and embedding helpers for larger scene experiments.
 - Compatibility fixes across the viewer and vendored GraspNet/Dex-Net stack so the app boots and runs on current environments.
 
 ## Quick Launch
@@ -115,19 +114,17 @@ Query format:
 
 | Goal | File |
 | --- | --- |
-| Launch or retrain remote scenes on SOL | `scripts/train_remote_scene.py` |
+| Launch or retrain a scene run | `scripts/train_remote_scene.py` |
 | Align an HLOC/SfM scene back into robot frame | `scripts/prepare_robot_frame_scene.py` |
 | Generate SigLIP 2 pyramid embeddings | `scripts/generate_siglip2_embeddings.py` |
 | Run the main grasp UI | `scripts/gen_grasp.py` |
 | Shared scene backend abstraction | `robot_lerf/scene_backends.py` |
 | Gaussian semantic query path | `robot_lerf/siglip_scene_query.py` |
-| SOL setup guide | `SOL_TRAINING.md` |
-| Status handoff | `HANDOFF_2026-04-17.md` |
 
 ## Expected Repo Layout
 
 ```text
-lerf/
+gaussian-task-grasping/
   data/
     <scene_name>/
       transforms.json
@@ -139,28 +136,6 @@ lerf/
       <method>/<run_name>/config.yml
   robot_lerf/
   scripts/
-  HANDOFF_2026-04-17.md
-  SOL_CODEBASE_ARCHITECTURE.md
-  SOL_TRAINING.md
-```
-
-## SOL Usage
-
-Train on SOL with a CUDA environment:
-
-```bash
-python scripts/train_remote_scene.py \
-  --data data/flowers_take7 \
-  --backend gaussian \
-  --device cuda \
-  --steps 30000 \
-  --run-name flowers_gs_a100
-```
-
-If the remote `viser` app starts on port `8082`, tunnel it with:
-
-```bash
-ssh -N -J mtiwar26@sol.asu.edu -L 8082:127.0.0.1:8082 mtiwar26@sg236
 ```
 
 ## Citation
