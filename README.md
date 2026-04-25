@@ -1,6 +1,6 @@
-# LERF-TOGO: Gaussian Splatting + SigLIP 2 for Task-Oriented Grasping
+# Gaussian Task Grasping: Gaussian Splatting + SigLIP 2 for Task-Oriented Grasping
 
-> Recruiter-friendly snapshot: this repo extends LERF-TOGO with a Gaussian Splatting scene backend, robot-frame alignment tooling, and a working grasp-generation UI for semantic robotic manipulation.
+> Recruiter-friendly snapshot: this repo builds on the LERF-TOGO research direction with a Gaussian Splatting scene backend, robot-frame alignment tooling, and a working grasp-generation UI for semantic robotic manipulation.
 
 [![Watch the HLOC Gaussian demo](docs/media/hloc_poster.png)](docs/media/flowers_take7_hloc_v3_interp.mp4)
 
@@ -38,8 +38,8 @@ Follow the official Nerfstudio setup until `tinycudann` is working:
 ### 2. Clone and install this repo
 
 ```bash
-git clone https://github.com/lerftogo/lerftogo.git
-cd lerftogo
+git clone https://github.com/milan-tiwari/gaussian-task-grasping.git
+cd gaussian-task-grasping
 python -m pip install -e .
 ```
 
