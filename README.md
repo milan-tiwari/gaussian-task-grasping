@@ -1,6 +1,6 @@
 # Gaussian Task Grasping: Gaussian Splatting + SigLIP 2 for Task-Oriented Grasping
 
-> Recruiter-friendly snapshot: this repo builds on the LERF-TOGO research direction with a Gaussian Splatting scene backend, robot-frame alignment tooling, and a working grasp-generation UI for semantic robotic manipulation.
+> This repo builds on the LERF-TOGO research direction with a Gaussian Splatting scene backend, robot-frame alignment tooling, and a working grasp-generation UI for semantic robotic manipulation.
 
 <p align="center">
   <img src="docs/media/flowers_take7_hloc_v3_demo.gif" alt="HLOC-initialized Gaussian reconstruction demo" width="820" />
