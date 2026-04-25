@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+.env
+
+# OS
+.DS_Store
+
+# Local research artifacts
+Baseline/
+data/
+exports/
+kaggle/
+outputs/
+presentations/
+presentations.zip
+tmp/
+
+# Root media / report exports
+flowers_take7_*.mp4
+frame_*.png
+img*.png
+LERF_TOGO_Team10_MilanTiwari_DheerajKiranEnna_UpdateReport.bib
+LERF_TOGO_Team10_MilanTiwari_DheerajKiranEnna_UpdateReport.pdf
+LERF_TOGO_Team10_MilanTiwari_DheerajKiranEnna_UpdateReport.tex
+neurips_2026.bib
+RAS AI Portfolio Guidelines - Fall 2024.pdf
+scripts/train_scene.slurm
+!docs/media/flowers_take7_hloc_v3_interp.mp4

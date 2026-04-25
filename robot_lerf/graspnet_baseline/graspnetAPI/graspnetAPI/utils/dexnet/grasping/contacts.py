@@ -35,7 +35,6 @@ from autolab_core import RigidTransform
 from ..constants import NO_CONTACT_DIST
 from ..constants import WIN_DIST_LIM
 
-import IPython
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 

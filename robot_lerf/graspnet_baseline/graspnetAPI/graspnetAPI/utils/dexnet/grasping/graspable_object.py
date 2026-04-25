@@ -32,7 +32,6 @@ import numpy as np
 from .meshpy import mesh as m
 from .meshpy import sdf as s
 
-import IPython
 import matplotlib.pyplot as plt
 
 from autolab_core import RigidTransform, SimilarityTransform
@@ -229,4 +228,3 @@ class GraspableObject3D(GraspableObject):
         window1 = contact1.surface_information(width, num_steps, direction=direction1)
         window2 = contact2.surface_information(width, num_steps, direction=direction2)
         return window1, window2, contact1, contact2
-

@@ -5,9 +5,11 @@ version = "0.1.0"
 dependencies=[
     "yourdfpy",
     "kornia",
-    "torchtyping",
     "autolab-core",
-    "python-fcl"
+    "python-fcl",
+    "pillow",
+    "transformers>=4.50.0; python_version >= '3.9'",
+    "sentencepiece; python_version >= '3.9'"
 ]
 
 [tool.setuptools.packages.find]

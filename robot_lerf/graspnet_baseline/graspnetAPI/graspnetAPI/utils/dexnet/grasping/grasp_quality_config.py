@@ -40,8 +40,6 @@ import os
 import sys
 import time
 
-import IPython
-
 # class GraspQualityConfig(object, metaclass=ABCMeta):
 class GraspQualityConfig(object):
     """

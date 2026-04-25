@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import matplotlib.pyplot as plt
 import open3d as o3d
@@ -16,7 +17,6 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.cameras.cameras import Cameras
 from nerfstudio.pipelines.base_pipeline import Pipeline
-from nerfstudio.exporter.exporter_utils import generate_point_cloud
 
 from collections import deque
 from scipy import ndimage
@@ -79,12 +79,93 @@ class NerfstudioWrapper:
         applied_transform[:3, :] = dp_outputs.dataparser_transform.numpy() #world to ns
         applied_transform = np.linalg.inv(applied_transform)
         applied_transform = applied_transform @ np.diag([1/dp_outputs.dataparser_scale]*3+[1]) #scale is post
-        self.applied_transform = applied_transform
+        self.scene_dir = self._resolve_scene_dir(dp_outputs)
+        self.scene_alignment, self.scene_alignment_path = self._discover_scene_alignment(self.scene_dir)
+        self.scene_alignment_inv = np.linalg.inv(self.scene_alignment)
+        self.applied_transform = self.scene_alignment @ applied_transform
+        if self.scene_alignment_path is None:
+            scene_label = self.scene_dir if self.scene_dir is not None else "<unknown scene>"
+            print(
+                f"[robot_lerf] No robot-frame alignment found for {scene_label}. "
+                "Using identity transform."
+            )
+        else:
+            print(f"[robot_lerf] Using robot-frame alignment: {self.scene_alignment_path}")
 
         self.num_cameras = len(self.camera_path.camera_to_worlds)
 
+    @staticmethod
+    def _resolve_scene_dir(dp_outputs) -> Path | None:
+        image_filenames = getattr(dp_outputs, "image_filenames", None)
+        if not image_filenames:
+            return None
+        try:
+            first_image = Path(image_filenames[0]).resolve()
+        except Exception:
+            return None
+        image_dir = first_image.parent
+        if image_dir.name == "images":
+            return image_dir.parent
+        return image_dir
+
+    @staticmethod
+    def _similarity_matrix(scale: float, rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
+        transform = np.eye(4, dtype=np.float64)
+        transform[:3, :3] = float(scale) * np.asarray(rotation, dtype=np.float64)
+        transform[:3, 3] = np.asarray(translation, dtype=np.float64)
+        return transform
+
+    def _discover_scene_alignment(self, scene_dir: Path | None) -> Tuple[np.ndarray, Path | None]:
+        identity = np.eye(4, dtype=np.float64)
+        explicit_alignment = os.environ.get("ROBOT_LERF_ALIGNMENT_JSON")
+        candidates: list[tuple[Path, bool]] = []
+        if explicit_alignment:
+            candidates.append((Path(explicit_alignment).expanduser(), True))
+        if scene_dir is not None:
+            scene_root = scene_dir.parent
+            candidates.append((scene_root / "alignment.json", False))
+            data_root = scene_root.parent
+            for alignment_path in data_root.glob("*/alignment.json"):
+                candidates.append((alignment_path, False))
+
+        seen = set()
+        for alignment_path, is_explicit in candidates:
+            alignment_path = alignment_path.resolve()
+            if alignment_path in seen or not alignment_path.is_file():
+                continue
+            seen.add(alignment_path)
+            try:
+                alignment = json.loads(alignment_path.read_text())
+            except Exception:
+                continue
+            if scene_dir is not None and not is_explicit:
+                sfm_scene = alignment.get("sfm_scene")
+                if not sfm_scene:
+                    continue
+                if Path(sfm_scene).name != scene_dir.name:
+                    continue
+            if scene_dir is not None and is_explicit:
+                sfm_scene = alignment.get("sfm_scene")
+                if sfm_scene and Path(sfm_scene).name != scene_dir.name:
+                    print(
+                        f"[robot_lerf] Explicit alignment {alignment_path} targets {Path(sfm_scene).name}, "
+                        f"but current scene is {scene_dir.name}. Using explicit override anyway."
+                    )
+            try:
+                return self._similarity_matrix(
+                    scale=float(alignment["scale"]),
+                    rotation=np.asarray(alignment["rotation_matrix"], dtype=np.float64),
+                    translation=np.asarray(alignment["translation"], dtype=np.float64),
+                ), alignment_path
+            except Exception:
+                continue
+        return identity, None
+
     # Note: applies to any real camera in world space
     def visercam_to_ns(self, c2w) -> np.ndarray:
+        world_c2w = np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
+        world_c2w = self.scene_alignment_inv @ world_c2w
+        c2w = world_c2w[:3, :]
         dp_outputs = self.pipeline.datamanager.train_dataparser_outputs
         foobar = np.concatenate([dp_outputs.dataparser_transform.numpy(), np.array([[0, 0, 0, 1]])], axis=0)
         c2w = foobar @ np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
@@ -94,6 +175,9 @@ class NerfstudioWrapper:
         return c2w
 
     def visercam_to_ns_world(self, c2w) -> np.ndarray:
+        world_c2w = np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
+        world_c2w = self.scene_alignment_inv @ world_c2w
+        c2w = world_c2w[:3, :]
         dp_outputs = self.pipeline.datamanager.train_dataparser_outputs
         foobar = np.concatenate([dp_outputs.dataparser_transform.numpy(), np.array([[0, 0, 0, 1]])], axis=0)
         c2w = foobar @ np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
@@ -108,6 +192,7 @@ class NerfstudioWrapper:
         dp_outputs = self.pipeline.datamanager.train_dataparser_outputs
         foobar = np.concatenate([dp_outputs.dataparser_transform.numpy(), np.array([[0, 0, 0, 1]])], axis=0)
         c2w = np.linalg.inv(foobar) @ np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
+        c2w = self.scene_alignment @ c2w
         c2w = c2w[:3, :]
         return c2w
 
@@ -351,18 +436,33 @@ class NerfstudioWrapper:
 
     def create_pointcloud(self) -> Tuple[tr.PointCloud, np.ndarray]:
         self.pipeline.model.step = 0
-        orig_num_rays_per_batch = self.pipeline.datamanager.train_pixel_sampler.num_rays_per_batch
-        self.pipeline.datamanager.train_pixel_sampler.num_rays_per_batch = 100000
+        if hasattr(self.pipeline.datamanager, "cached_train"):
+            global_pointcloud = self._create_pointcloud_from_full_images(num_points=1000000)
+        else:
+            try:
+                from nerfstudio.exporter.exporter_utils import generate_point_cloud
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Fell back to nerfstudio.exporter.generate_point_cloud(), but that import failed. "
+                    "This usually means the optional pymeshlab dependency is broken in the current "
+                    "environment. Use the FullImageDatamanager path when available, or repair the "
+                    "pymeshlab/Qt install for this env."
+                ) from exc
+            pixel_sampler = getattr(self.pipeline.datamanager, "train_pixel_sampler", None)
+            orig_num_rays_per_batch = None
+            if pixel_sampler is not None and hasattr(pixel_sampler, "num_rays_per_batch"):
+                orig_num_rays_per_batch = pixel_sampler.num_rays_per_batch
+                pixel_sampler.num_rays_per_batch = 100000
 
-        global_pointcloud: o3d.geometry.PointCloud = generate_point_cloud(
-            self.pipeline, 
-            remove_outliers=True, 
-            std_ratio=0.1,
-            depth_output_name='depth',
-            num_points = 1000000,
-            use_bounding_box=False
+            global_pointcloud = generate_point_cloud(
+                self.pipeline,
+                remove_outliers=True,
+                std_ratio=0.1,
+                depth_output_name='depth',
+                num_points=1000000,
             )
-        self.pipeline.datamanager.train_pixel_sampler.num_rays_per_batch = orig_num_rays_per_batch
+            if pixel_sampler is not None and orig_num_rays_per_batch is not None:
+                pixel_sampler.num_rays_per_batch = orig_num_rays_per_batch
         global_pointcloud.points = o3d.utility.Vector3dVector(tr.transformations.transform_points(np.asarray(global_pointcloud.points), self.applied_transform)) #nerfstudio pc to world/viser pc
         global_pointcloud = global_pointcloud.voxel_down_sample(0.001)
 
@@ -386,6 +486,18 @@ class NerfstudioWrapper:
         # inflated_bbox = inflated_bbox.rotate(inv_t[:3,:3])
         # inflated_bbox = inflated_bbox.translate(inv_t[:3,3])
         world_pointcloud_o3d = global_pointcloud.crop(inflated_bbox)
+        if len(world_pointcloud_o3d.points) == 0:
+            alignment_hint = (
+                f"using alignment file {self.scene_alignment_path}"
+                if self.scene_alignment_path is not None
+                else "with no alignment file loaded"
+            )
+            raise RuntimeError(
+                "Robot-frame crop produced zero points. "
+                f"The scene was loaded {alignment_hint}. "
+                "For HLOC checkpoints, set ROBOT_LERF_ALIGNMENT_JSON to the robot-frame alignment.json "
+                "before launching gen_grasp.py."
+            )
         world_pointcloud = tr.PointCloud(
             vertices=np.asarray(world_pointcloud_o3d.points),
             colors=np.asarray(world_pointcloud_o3d.colors)
@@ -395,3 +507,64 @@ class NerfstudioWrapper:
             colors=np.asarray(global_pointcloud.colors)
         )
         return world_pointcloud,global_pointcloud,table_center
+
+    def _create_pointcloud_from_full_images(self, num_points: int = 1000000) -> o3d.geometry.PointCloud:
+        """Create a point cloud for camera-based datamanagers such as Splatfacto's FullImageDatamanager."""
+        train_cameras = getattr(self.pipeline.datamanager, "train_cameras", None)
+        if train_cameras is None:
+            train_cameras = self.pipeline.datamanager.train_dataset.cameras
+        train_cameras = train_cameras.to(device)
+        num_cameras = len(train_cameras)
+        samples_per_camera = max(4096, int(np.ceil(float(num_points) / max(num_cameras, 1))))
+
+        points = []
+        rgbs = []
+        for cam_idx in range(num_cameras):
+            camera = copy.deepcopy(train_cameras[cam_idx : cam_idx + 1]).to(device)
+            if camera.metadata is None:
+                camera.metadata = {}
+            else:
+                camera.metadata = dict(camera.metadata)
+            camera.metadata["cam_idx"] = cam_idx
+
+            with torch.no_grad():
+                outputs = self.pipeline.model.get_outputs_for_camera(camera)
+
+            ray_bundle = camera.generate_rays(camera_indices=0)
+            point = ray_bundle.origins + ray_bundle.directions * outputs["depth"]
+            rgb = outputs["rgb"]
+
+            accumulation = outputs.get("accumulation")
+            if accumulation is not None:
+                mask = accumulation.squeeze(-1) > 0.5
+            else:
+                mask = torch.isfinite(outputs["depth"].squeeze(-1)) & (outputs["depth"].squeeze(-1) > 0)
+
+            point = point[mask]
+            rgb = rgb[mask]
+            if point.shape[0] == 0:
+                continue
+
+            if point.shape[0] > samples_per_camera:
+                choice = torch.randperm(point.shape[0], device=point.device)[:samples_per_camera]
+                point = point[choice]
+                rgb = rgb[choice]
+
+            points.append(point.detach().cpu())
+            rgbs.append(rgb.detach().cpu())
+
+        if not points:
+            raise RuntimeError("Point cloud generation produced no valid points from the training cameras.")
+
+        points_tensor = torch.cat(points, dim=0)
+        rgbs_tensor = torch.cat(rgbs, dim=0)
+        if points_tensor.shape[0] > num_points:
+            choice = torch.randperm(points_tensor.shape[0])[:num_points]
+            points_tensor = points_tensor[choice]
+            rgbs_tensor = rgbs_tensor[choice]
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points_tensor.double().numpy())
+        pcd.colors = o3d.utility.Vector3dVector(rgbs_tensor.double().numpy())
+        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=0.1)
+        return pcd

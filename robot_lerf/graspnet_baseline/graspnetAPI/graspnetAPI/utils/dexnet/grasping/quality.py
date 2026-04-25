@@ -53,8 +53,6 @@ from .meshpy import sdf as s
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-import IPython
-
 # turn off output logging
 cvx.solvers.options['show_progress'] = False
 

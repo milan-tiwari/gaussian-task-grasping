@@ -44,7 +44,6 @@ from .random_variables import GraspableObjectPoseGaussianRV, ParallelJawGraspPos
 from .quality import PointGraspMetrics3D
 
 from autolab_core import RigidTransform
-import IPython
 
 class GraspQualityResult:
     """ Stores the results of grasp quality computation.

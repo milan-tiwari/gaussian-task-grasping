@@ -1,0 +1,52 @@
+<svg width="1400" height="760" viewBox="0 0 1400 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1400" height="760" rx="40" fill="#F4F7FB"/>
+  <rect x="36" y="36" width="1328" height="688" rx="32" fill="#FFFFFF" stroke="#D8E1EC"/>
+  <text x="88" y="114" fill="#10213A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="38" font-weight="700">Current repo pipeline and strongest finished path</text>
+  <text x="88" y="160" fill="#5B667A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="22">This is the system story a recruiter can understand in one glance: train, align, embed, and run a grasp UI.</text>
+
+  <rect x="88" y="236" width="276" height="250" rx="28" fill="#F8FBFF" stroke="#DDE7F6"/>
+  <circle cx="132" cy="286" r="20" fill="#1F5BFF"/>
+  <text x="124" y="293" fill="#FFFFFF" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">1</text>
+  <text x="168" y="292" fill="#10213A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="28" font-weight="700">Train scene</text>
+  <text x="128" y="338" fill="#5B667A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18">Use <tspan font-weight="700">scripts/train_remote_scene.py</tspan> to train either the original LERF path or a Gaussian Splatting scene on SOL.</text>
+  <rect x="128" y="414" width="144" height="34" rx="17" fill="#E8F0FF"/>
+  <text x="151" y="436" fill="#1F5BFF" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Working</text>
+
+  <rect x="400" y="236" width="276" height="250" rx="28" fill="#F8FBFF" stroke="#DDE7F6"/>
+  <circle cx="444" cy="286" r="20" fill="#1F5BFF"/>
+  <text x="436" y="293" fill="#FFFFFF" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">2</text>
+  <text x="480" y="292" fill="#10213A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="28" font-weight="700">Align robot frame</text>
+  <text x="440" y="338" fill="#5B667A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18">Use <tspan font-weight="700">scripts/prepare_robot_frame_scene.py</tspan> to transfer strong HLOC geometry back into robot/world coordinates.</text>
+  <rect x="440" y="414" width="144" height="34" rx="17" fill="#E8F6F0"/>
+  <text x="463" y="436" fill="#0C8F67" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Working</text>
+
+  <rect x="712" y="236" width="276" height="250" rx="28" fill="#F8FBFF" stroke="#DDE7F6"/>
+  <circle cx="756" cy="286" r="20" fill="#1F5BFF"/>
+  <text x="748" y="293" fill="#FFFFFF" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">3</text>
+  <text x="792" y="292" fill="#10213A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="28" font-weight="700">Generate SigLIP 2 embeddings</text>
+  <text x="752" y="338" fill="#5B667A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18">Use <tspan font-weight="700">scripts/generate_siglip2_embeddings.py</tspan> to build the multi-scale image descriptors consumed by the new query path.</text>
+  <rect x="752" y="414" width="164" height="34" rx="17" fill="#FFF3DE"/>
+  <text x="775" y="436" fill="#C27100" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Ready to use</text>
+
+  <rect x="1024" y="236" width="276" height="250" rx="28" fill="#F8FBFF" stroke="#DDE7F6"/>
+  <circle cx="1068" cy="286" r="20" fill="#1F5BFF"/>
+  <text x="1060" y="293" fill="#FFFFFF" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">4</text>
+  <text x="1104" y="292" fill="#10213A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="28" font-weight="700">Run the grasp UI</text>
+  <text x="1064" y="338" fill="#5B667A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18">Use <tspan font-weight="700">scripts/gen_grasp.py</tspan> to load the scene, build the point cloud, generate grasps, filter collisions, and serve the browser UI.</text>
+  <rect x="1064" y="414" width="144" height="34" rx="17" fill="#E8F0FF"/>
+  <text x="1087" y="436" fill="#1F5BFF" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Working</text>
+
+  <path d="M364 362H392" stroke="#B6C8E5" stroke-width="6" stroke-linecap="round"/>
+  <path d="M676 362H704" stroke="#B6C8E5" stroke-width="6" stroke-linecap="round"/>
+  <path d="M988 362H1016" stroke="#B6C8E5" stroke-width="6" stroke-linecap="round"/>
+
+  <rect x="88" y="534" width="620" height="136" rx="28" fill="#EEF7F2" stroke="#D2E9DB"/>
+  <text x="128" y="588" fill="#0C8F67" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">Strongest completed path</text>
+  <text x="128" y="632" fill="#10213A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="30" font-weight="700">Gaussian geometry + grasp generation is working end-to-end.</text>
+  <text x="128" y="660" fill="#5B667A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18">The repo can load the Gaussian checkpoint, build the world-frame point cloud, generate grasp proposals, collision filter them, and keep serving the UI on SOL.</text>
+
+  <rect x="744" y="534" width="556" height="136" rx="28" fill="#FFF6ED" stroke="#F0DDC8"/>
+  <text x="784" y="588" fill="#C27100" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">Remaining blocker</text>
+  <text x="784" y="632" fill="#10213A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="30" font-weight="700">Finish the Gaussian semantic-query initialization path.</text>
+  <text x="784" y="660" fill="#5B667A" font-family="Avenir Next, Segoe UI, Arial, sans-serif" font-size="18">The next debugging step is to capture the live backend error after clicking <tspan font-weight="700">Calculate query</tspan> with a valid prompt such as <tspan font-weight="700">flower;petal</tspan>.</text>
+</svg>
