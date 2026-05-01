@@ -75,6 +75,27 @@ def _mask_top_fraction(scores: np.ndarray, quantile: float, min_points: int) -> 
     return dense_mask
 
 
+def _confidence_mask(
+    scores: np.ndarray,
+    quantile: float,
+    min_score: float,
+    fallback_top_k: int,
+) -> np.ndarray:
+    if scores.size == 0:
+        return np.zeros(0, dtype=bool)
+    threshold = max(float(np.quantile(scores, quantile)), float(min_score))
+    mask = scores >= threshold
+    if np.any(mask):
+        return mask
+    if fallback_top_k <= 0:
+        return mask
+    top_k = min(fallback_top_k, scores.size)
+    indices = np.argpartition(scores, -top_k)[-top_k:]
+    fallback = np.zeros_like(scores, dtype=bool)
+    fallback[indices] = True
+    return fallback
+
+
 def _cap_mask_size(scores: np.ndarray, mask: np.ndarray, max_points: int) -> np.ndarray:
     if int(mask.sum()) <= max_points:
         return mask
@@ -250,6 +271,14 @@ class SigLIPSceneQueryEngine:
         self._load_scene_aliases()
         self._semantic_scene_dir = self._discover_semantic_scene_dir()
         self._semantic_scene_name = self._semantic_scene_dir.name
+        self._semantic_output_dir = self.output_root / self._semantic_scene_name
+        self._clip_dir: Path | None = None
+        self._dino_file: Path | None = None
+        print(
+            "[robot_lerf] Locked semantic scene source: "
+            f"scene_dir={self._semantic_scene_dir}, "
+            f"output_dir={self._semantic_output_dir}"
+        )
         self._load_scene_metadata()
         self._load_embedding_tiles()
         self._load_dino_features()
@@ -273,12 +302,9 @@ class SigLIPSceneQueryEngine:
         text_features = self._encoder.encode_text(self._positives).detach().cpu().numpy()
         similarities = self._embedding_matrix @ text_features.T
         similarities = (similarities + 1.0) * 0.5
-        normalized = np.stack(
-            [_normalize_scores(similarities[:, idx]) for idx in range(similarities.shape[1])],
-            axis=1,
-        )
+        similarities = np.clip(similarities.astype(np.float32), 0.0, 1.0)
 
-        record = self._build_semantic_record(normalized)
+        record = self._build_semantic_record(similarities)
         return self._to_pointcloud_outputs(record)
 
     def set_reference_pointcloud(
@@ -311,12 +337,12 @@ class SigLIPSceneQueryEngine:
 
     def _build_semantic_record(self, normalized: np.ndarray) -> SemanticTileRecord:
         if self._reference_assignments is None or self._reference_points_model is None:
-            object_scores = normalized[:, 0]
+            object_scores = normalized[:, 0].astype(np.float32)
             if normalized.shape[1] >= 2:
-                composite_scores = object_scores * normalized[:, 1]
+                composite_scores = normalized[:, 1].astype(np.float32)
             else:
                 composite_scores = object_scores.copy()
-            place_scores = normalized[:, 2] if normalized.shape[1] >= 3 else None
+            place_scores = normalized[:, 2].astype(np.float32) if normalized.shape[1] >= 3 else None
             return SemanticTileRecord(
                 points_model=self._points_model,
                 colors=self._colors,
@@ -332,9 +358,9 @@ class SigLIPSceneQueryEngine:
             return SemanticTileRecord(
                 points_model=self._points_model,
                 colors=self._colors,
-                object_scores=normalized[:, 0],
-                composite_scores=normalized[:, 0] * normalized[:, 1] if normalized.shape[1] >= 2 else normalized[:, 0].copy(),
-                place_scores=normalized[:, 2] if normalized.shape[1] >= 3 else None,
+                object_scores=normalized[:, 0].astype(np.float32),
+                composite_scores=normalized[:, 1].astype(np.float32) if normalized.shape[1] >= 2 else normalized[:, 0].astype(np.float32).copy(),
+                place_scores=normalized[:, 2].astype(np.float32) if normalized.shape[1] >= 3 else None,
                 dino_features=None,
                 dino_valid=None,
             )
@@ -353,7 +379,7 @@ class SigLIPSceneQueryEngine:
         observed = np.bincount(self._reference_assignments[valid], minlength=num_ref) > 0
         object_scores = aggregated_terms[0][observed]
         if len(aggregated_terms) >= 2:
-            composite_scores = object_scores * aggregated_terms[1][observed]
+            composite_scores = aggregated_terms[1][observed]
         else:
             composite_scores = object_scores.copy()
         place_scores = aggregated_terms[2][observed] if len(aggregated_terms) >= 3 else None
@@ -390,36 +416,69 @@ class SigLIPSceneQueryEngine:
             object_gate_scores = object_gate_scores * np.clip(dino_scores, 0.0, 1.0)
             semantic_gate_scores = semantic_gate_scores * np.clip(dino_scores, 0.0, 1.0)
 
-        object_mask = _mask_top_fraction(object_gate_scores, quantile=0.9, min_points=180)
-        object_mask = _cap_mask_size(object_gate_scores, object_mask, max_points=2500)
-        object_mask = _refine_mask_to_cluster(
-            record.points_model,
+        object_mask = _confidence_mask(
             object_gate_scores,
-            object_mask,
-            eps=0.025,
-            min_points=24,
+            quantile=float(os.environ.get("ROBOT_LERF_OBJECT_MASK_QUANTILE", "0.92")),
+            min_score=float(os.environ.get("ROBOT_LERF_OBJECT_MIN_SCORE", "0.30")),
+            fallback_top_k=int(os.environ.get("ROBOT_LERF_OBJECT_FALLBACK_TOPK", "32")),
         )
+        object_mask = _cap_mask_size(object_gate_scores, object_mask, max_points=2500)
+        if int(object_mask.sum()) >= 12:
+            object_mask = _refine_mask_to_cluster(
+                record.points_model,
+                object_gate_scores,
+                object_mask,
+                eps=0.025,
+                min_points=min(24, int(object_mask.sum())),
+            )
 
         if dino_gate_mask is not None:
             dino_object_mask = object_mask & dino_gate_mask
-            if int(dino_object_mask.sum()) >= 48:
+            if int(dino_object_mask.sum()) >= 12:
                 object_mask = dino_object_mask
 
-        semantic_mask = _mask_top_fraction(semantic_gate_scores, quantile=0.97, min_points=96)
+        if np.any(object_mask):
+            object_indices = np.flatnonzero(object_mask)
+            object_semantic_scores = semantic_gate_scores[object_indices]
+            local_quantile = float(os.environ.get("ROBOT_LERF_PART_MASK_QUANTILE", "0.85"))
+            local_mask = _confidence_mask(
+                object_semantic_scores,
+                quantile=local_quantile,
+                min_score=float(os.environ.get("ROBOT_LERF_PART_MIN_SCORE", "0.35")),
+                fallback_top_k=int(
+                    min(
+                        object_indices.size,
+                        int(os.environ.get("ROBOT_LERF_PART_FALLBACK_TOPK", "16")),
+                    )
+                ),
+            )
+            semantic_mask = np.zeros_like(object_mask, dtype=bool)
+            semantic_mask[object_indices[local_mask]] = True
+        else:
+            semantic_mask = _confidence_mask(
+                semantic_gate_scores,
+                quantile=0.97,
+                min_score=float(os.environ.get("ROBOT_LERF_PART_MIN_SCORE", "0.35")),
+                fallback_top_k=int(os.environ.get("ROBOT_LERF_PART_FALLBACK_TOPK", "16")),
+            )
+
         semantic_mask = _cap_mask_size(semantic_gate_scores, semantic_mask, max_points=1200)
-        semantic_mask = _refine_mask_to_cluster(
-            record.points_model,
-            semantic_gate_scores,
-            semantic_mask,
-            eps=0.02,
-            min_points=18,
-        )
+        if int(semantic_mask.sum()) >= 8:
+            semantic_mask = _refine_mask_to_cluster(
+                record.points_model,
+                semantic_gate_scores,
+                semantic_mask,
+                eps=0.02,
+                min_points=min(18, int(semantic_mask.sum())),
+            )
+        if np.any(object_mask):
+            semantic_mask &= object_mask
 
         if dino_gate_mask is not None:
             dino_semantic_mask = semantic_mask & dino_gate_mask
-            if int(dino_semantic_mask.sum()) >= 24:
+            if int(dino_semantic_mask.sum()) >= 8:
                 semantic_mask = dino_semantic_mask
-            elif int(object_mask.sum()) >= 24:
+            elif int(object_mask.sum()) >= 8:
                 semantic_mask = object_mask.copy()
 
         semantic_points = record.points_model[semantic_mask]
@@ -503,6 +562,8 @@ class SigLIPSceneQueryEngine:
 
     def _load_embedding_tiles(self) -> None:
         clip_dir = self._find_clip_dir()
+        self._clip_dir = clip_dir
+        print(f"[robot_lerf] Using SigLIP artifacts from: {clip_dir}")
         level_files = sorted(clip_dir.glob("level_*.npy"))
         if not level_files:
             raise FileNotFoundError(f"No SigLIP level embeddings found in {clip_dir}")
@@ -554,8 +615,8 @@ class SigLIPSceneQueryEngine:
         if not embeddings:
             raise RuntimeError(
                 "No valid SigLIP tiles could be projected for scene "
-                f"{self.scene_name}. Semantic metadata came from {self._semantic_scene_dir} "
-                f"and embeddings came from scene aliases {self._scene_name_candidates}."
+                f"{self.scene_name}. Semantic metadata and artifacts were locked to "
+                f"{self._semantic_scene_dir}."
             )
 
         points_world_np = np.concatenate(points_world, axis=0)
@@ -566,10 +627,16 @@ class SigLIPSceneQueryEngine:
 
     def _load_dino_features(self) -> None:
         dino_file = self._find_dino_file()
+        self._dino_file = dino_file
         if dino_file is None:
+            print(
+                "[robot_lerf] No DINO artifact found under locked semantic output dir: "
+                f"{self._semantic_output_dir}"
+            )
             self._dino_points_model = None
             self._dino_features = None
             return
+        print(f"[robot_lerf] Using DINO artifacts from: {dino_file}")
 
         dino_grids = np.load(dino_file)
         if dino_grids.ndim != 4:
@@ -650,35 +717,30 @@ class SigLIPSceneQueryEngine:
         self._reference_has_dino = observed
 
     def _find_clip_dir(self) -> Path:
-        checked_dirs = []
-        for scene_name in self._scene_name_candidates:
-            scene_output_dir = self.output_root / scene_name
-            checked_dirs.append(scene_output_dir)
-            preferred = scene_output_dir / f"clip_siglip2_{_slugify_model_name(self.model_name)}"
-            if preferred.is_dir():
-                return preferred
-            candidates = sorted(scene_output_dir.glob("clip_siglip2_*"))
-            if len(candidates) == 1:
-                return candidates[0]
-            if candidates:
-                return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)[0]
-        checked_str = ", ".join(str(path) for path in checked_dirs)
+        checked_dir = self._semantic_output_dir
+        preferred = checked_dir / f"clip_siglip2_{_slugify_model_name(self.model_name)}"
+        if preferred.is_dir():
+            return preferred
+        candidates = sorted(checked_dir.glob("clip_siglip2_*"))
+        if len(candidates) == 1:
+            return candidates[0]
+        if candidates:
+            return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)[0]
         raise FileNotFoundError(
-            "No SigLIP clip directory found. Checked: "
-            f"{checked_str}. Expected a clip_siglip2_* directory."
+            "No SigLIP clip directory found for locked semantic scene source "
+            f"{self._semantic_scene_name}. Checked {checked_dir}. "
+            "Expected a clip_siglip2_* directory."
         )
 
     def _find_dino_file(self) -> Path | None:
-        for scene_name in self._scene_name_candidates:
-            scene_output_dir = self.output_root / scene_name
-            preferred = scene_output_dir / "dino_dino_vitb8.npy"
-            if preferred.is_file():
-                return preferred
-            candidates = sorted(scene_output_dir.glob("dino_*.npy"))
-            if len(candidates) == 1:
-                return candidates[0]
-            if candidates:
-                return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)[0]
+        preferred = self._semantic_output_dir / "dino_dino_vitb8.npy"
+        if preferred.is_file():
+            return preferred
+        candidates = sorted(self._semantic_output_dir.glob("dino_*.npy"))
+        if len(candidates) == 1:
+            return candidates[0]
+        if candidates:
+            return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)[0]
         return None
 
     @staticmethod

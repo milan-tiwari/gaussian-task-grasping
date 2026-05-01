@@ -1,4 +1,4 @@
-# Gaussian Task Grasping: Gaussian Splatting + SigLIP 2 for Task-Oriented Grasping
+# Gaussian Task Grasping: Gaussian Splatting for Task-Oriented Grasping
 
 > This repo builds on the LERF-TOGO research direction with a Gaussian Splatting scene backend, robot-frame alignment tooling, and a working grasp-generation UI for semantic robotic manipulation.
 
@@ -6,23 +6,18 @@
   <img src="docs/media/flowers_take7_hloc_v3_demo.gif" alt="HLOC-initialized Gaussian reconstruction demo" width="820" />
 </p>
 
-<p align="center">
-  <img src="docs/media/flowers_take7_pointcloud.png" alt="World-frame Gaussian point cloud used for grasp generation" width="420" />
-</p>
-
 ## What This Repo Shows
 
 - Gaussian Splatting scenes train and load through a shared scene backend abstraction in `robot_lerf/scene_backends.py`.
 - HLOC/COLMAP reconstructions can be aligned back into the robot frame with `scripts/prepare_robot_frame_scene.py`.
 - `scripts/gen_grasp.py` loads a trained scene, builds the world-frame point cloud, generates grasps, runs collision filtering, and serves a `viser` UI.
-- SigLIP 2 multi-scale embeddings can be generated with `scripts/generate_siglip2_embeddings.py`.
-- The strongest finished path today is Gaussian geometry plus grasp generation; the remaining blocker is the final Gaussian semantic-query integration pass.
+- The active project path is Gaussian geometry plus grasp generation, with semantic integration still treated as experimental work rather than the default runtime path.
 
 ## Engineering Contributions In This Snapshot
 
 - Backend abstraction to support both the original LERF/Nerfstudio path and a Gaussian Splatting path from the same UI.
 - Robot-frame alignment workflow for transferring high-quality SfM geometry back into executable robot coordinates.
-- SigLIP 2 embedding worker and scene-query scaffolding for a newer semantic pipeline.
+- Scene loading, workspace alignment, and semantic-query debugging utilities around the Gaussian grasping path.
 - Remote training and embedding helpers for larger scene experiments.
 - Compatibility fixes across the viewer and vendored GraspNet/Dex-Net stack so the app boots and runs on current environments.
 
@@ -57,36 +52,7 @@ pip install -e .
 cd ../../..
 ```
 
-### 4. Optional: install SigLIP 2 dependencies
-
-```bash
-pip install pillow "transformers>=4.50.0" sentencepiece
-```
-
-Notes:
-
-- SigLIP 2 support requires a newer `transformers` stack than many older Python 3.8 LERF environments provide.
-- If your environment only resolves `transformers<=4.46.3`, use Python 3.9+ for the SigLIP 2 embedding step.
-
-### 5. Generate SigLIP 2 embeddings for a scene
-
-```bash
-python scripts/generate_siglip2_embeddings.py \
-  --scene-dir data/<scene_name> \
-  --output-root outputs \
-  --device cuda:0
-```
-
-This writes:
-
-```text
-outputs/<scene_name>/clip_siglip2_<model_slug>/
-  level_0.npy
-  level_0.info
-  ...
-```
-
-### 6. Launch the interactive grasp UI
+### 4. Launch the interactive grasp UI
 
 ```bash
 python scripts/gen_grasp.py \
@@ -108,7 +74,7 @@ Query format:
 - Gaussian training is effectively CUDA-only in this Nerfstudio/Splatfacto setup.
 - CPU-only Macs are fine for documentation, dataset prep, and baseline repo work, but not for realistic Gaussian training.
 - The current Gaussian backend can load the checkpoint, build the point cloud, generate grasps, and serve the UI.
-- The remaining unresolved piece is the end-to-end semantic query initialization path for the Gaussian backend.
+- Semantic-query work is still experimental and is not the main advertised launch path for this repo snapshot.
 
 ## Key Files
 
@@ -116,10 +82,9 @@ Query format:
 | --- | --- |
 | Launch or retrain a scene run | `scripts/train_remote_scene.py` |
 | Align an HLOC/SfM scene back into robot frame | `scripts/prepare_robot_frame_scene.py` |
-| Generate SigLIP 2 pyramid embeddings | `scripts/generate_siglip2_embeddings.py` |
 | Run the main grasp UI | `scripts/gen_grasp.py` |
+| Build Gaussian point clouds for grasping | `robot_lerf/graspnet_baseline/load_ns_model.py` |
 | Shared scene backend abstraction | `robot_lerf/scene_backends.py` |
-| Gaussian semantic query path | `robot_lerf/siglip_scene_query.py` |
 
 ## Expected Repo Layout
 
@@ -132,7 +97,6 @@ gaussian-task-grasping/
       depth...
   outputs/
     <scene_name>/
-      clip_siglip2_<model_slug>/
       <method>/<run_name>/config.yml
   robot_lerf/
   scripts/

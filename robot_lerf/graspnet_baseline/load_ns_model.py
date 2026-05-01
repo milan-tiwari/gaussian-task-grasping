@@ -26,6 +26,27 @@ import kornia.morphology as kmorph
 import kornia.filters as kfilters
 import os
 
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
 class RealsenseCamera:
     # taken from graspnet demo parameters
     realsense = o3d.camera.PinholeCameraIntrinsic(
@@ -75,6 +96,10 @@ class NerfstudioWrapper:
         self.camera_path: Cameras = pipeline.datamanager.train_dataset.cameras
 
         dp_outputs = pipeline.datamanager.train_dataparser_outputs
+        self._dataparser_transform_h = np.concatenate(
+            [dp_outputs.dataparser_transform.numpy(), np.array([[0, 0, 0, 1]])],
+            axis=0,
+        )
         applied_transform = np.eye(4)
         applied_transform[:3, :] = dp_outputs.dataparser_transform.numpy() #world to ns
         applied_transform = np.linalg.inv(applied_transform)
@@ -166,9 +191,7 @@ class NerfstudioWrapper:
         world_c2w = np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
         world_c2w = self.scene_alignment_inv @ world_c2w
         c2w = world_c2w[:3, :]
-        dp_outputs = self.pipeline.datamanager.train_dataparser_outputs
-        foobar = np.concatenate([dp_outputs.dataparser_transform.numpy(), np.array([[0, 0, 0, 1]])], axis=0)
-        c2w = foobar @ np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
+        c2w = self._dataparser_transform_h @ np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
         c2w = c2w[:3, :]
         c2w[:3, 2] *= -1
         c2w[:3, 1] *= -1
@@ -178,9 +201,7 @@ class NerfstudioWrapper:
         world_c2w = np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
         world_c2w = self.scene_alignment_inv @ world_c2w
         c2w = world_c2w[:3, :]
-        dp_outputs = self.pipeline.datamanager.train_dataparser_outputs
-        foobar = np.concatenate([dp_outputs.dataparser_transform.numpy(), np.array([[0, 0, 0, 1]])], axis=0)
-        c2w = foobar @ np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
+        c2w = self._dataparser_transform_h @ np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
         c2w = c2w[:3, :]
         return c2w
 
@@ -189,9 +210,7 @@ class NerfstudioWrapper:
         c2w = self.camera_path[train_cam_ind].camera_to_worlds.squeeze().numpy().copy()
         c2w[:3, 2] *= -1
         c2w[:3, 1] *= -1
-        dp_outputs = self.pipeline.datamanager.train_dataparser_outputs
-        foobar = np.concatenate([dp_outputs.dataparser_transform.numpy(), np.array([[0, 0, 0, 1]])], axis=0)
-        c2w = np.linalg.inv(foobar) @ np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
+        c2w = np.linalg.inv(self._dataparser_transform_h) @ np.concatenate([c2w, np.array([[0, 0, 0, 1]])], axis=0)
         c2w = self.scene_alignment @ c2w
         c2w = c2w[:3, :]
         return c2w
@@ -251,9 +270,30 @@ class NerfstudioWrapper:
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points.double().cpu().numpy())
         pcd.colors = o3d.utility.Vector3dVector(rgbs.double().cpu().numpy())
-        pcd, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=0.01)
+        raw_count = len(pcd.points)
+        ind = np.arange(raw_count, dtype=np.int64)
+        nb_neighbors = min(_env_int("ROBOT_LERF_DINO_OUTLIER_NB_NEIGHBORS", 20), max(raw_count - 1, 1))
+        std_ratio = _env_float("ROBOT_LERF_DINO_OUTLIER_STD_RATIO", 1.0)
+        min_keep = min(raw_count, _env_int("ROBOT_LERF_MIN_DINO_SWEEP_POINTS", 512))
+        if raw_count > nb_neighbors and not _env_flag("ROBOT_LERF_DISABLE_DINO_OUTLIER", False):
+            filtered_pcd, filtered_ind = pcd.remove_statistical_outlier(
+                nb_neighbors=nb_neighbors,
+                std_ratio=std_ratio,
+            )
+            if len(filtered_pcd.points) >= min_keep:
+                pcd = filtered_pcd
+                ind = np.asarray(filtered_ind, dtype=np.int64)
+            else:
+                print(
+                    "[robot_lerf] DINO sweep outlier filter was too destructive; "
+                    f"keeping unfiltered cloud ({len(filtered_pcd.points)}/{raw_count} kept)."
+                )
         if ind is not None:
             dinos = dinos[ind]
+        print(
+            "[robot_lerf] LERF DINO sweep cloud: "
+            f"raw={raw_count}, kept={len(pcd.points)}, outlier_std={std_ratio}"
+        )
         return pcd, dinos, clips
 
     # Helper function to get DINO foreground mask and the object point in 2D
@@ -330,6 +370,7 @@ class NerfstudioWrapper:
 
     # Flood fill a point cloud given seed points
     def flood_fill_3d(self, pcd, pcd_tree, dino_vectors, seed_indices, tolerance):
+        radius = _env_float("ROBOT_LERF_DINO_FLOOD_RADIUS", 0.05)
         q = deque(seed_indices)
         seed_value = dino_vectors[seed_indices].mean(axis=0)
         np_pts = np.asarray(pcd.points)
@@ -339,7 +380,7 @@ class NerfstudioWrapper:
             pt_indx = q.popleft()
             if mask[pt_indx] == False:
                 mask[pt_indx] = True
-                [_, idx, _] = pcd_tree.search_radius_vector_3d(pcd.points[pt_indx], 0.03)
+                [_, idx, _] = pcd_tree.search_radius_vector_3d(pcd.points[pt_indx], radius)
                 np_idx = np.asarray(idx)
                 idx_tolerance = np.mean((dino_vectors[np_idx]- seed_value) ** 2, axis=-1)
                 idx_of_id = np.argwhere(idx_tolerance < tolerance).squeeze()
@@ -371,16 +412,39 @@ class NerfstudioWrapper:
             [ 0.0000,  0.9056,  0.4242, -0.20]]], device=device)
         
         pcd, dinos, _ = self.generate_lerf_pc(curcam, target_points)
+        raw_dino_count = len(pcd.points)
+        if raw_dino_count == 0:
+            print("[robot_lerf] LERF DINO sweep produced zero points.")
+            return None, None, None, None, None
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
         [_, idx, _] = pcd_tree.search_knn_vector_3d(target_points.double().cpu().detach().numpy(), 1)
         seed_indices = np.array(idx)
         dinos = np.matmul(dinos, dino_first_comp_2d)
-        print("floodfill start")
-        mask = self.flood_fill_3d(pcd, pcd_tree, dinos, seed_indices, tolerance=7.5)
+        flood_tolerance = _env_float("ROBOT_LERF_DINO_FLOOD_TOLERANCE", 7.5)
+        print(
+            "[robot_lerf] floodfill start: "
+            f"seed_count={len(seed_indices)}, candidates={raw_dino_count}, tolerance={flood_tolerance}"
+        )
+        mask = self.flood_fill_3d(pcd, pcd_tree, dinos, seed_indices, tolerance=flood_tolerance)
+        min_dino_points = min(raw_dino_count, _env_int("ROBOT_LERF_MIN_DINO_POINTS", 64))
+        if int(mask.sum()) < min_dino_points:
+            _, fallback_idx, _ = pcd_tree.search_knn_vector_3d(
+                target_points.double().cpu().detach().numpy(),
+                min_dino_points,
+            )
+            fallback_mask = np.zeros(raw_dino_count, dtype=bool)
+            fallback_mask[np.asarray(fallback_idx, dtype=np.int64)] = True
+            print(
+                "[robot_lerf] DINO floodfill was too sparse; "
+                f"expanding from {int(mask.sum())} to {int((mask | fallback_mask).sum())} nearest points."
+            )
+            mask = mask | fallback_mask
         pcd.points = o3d.utility.Vector3dVector(np.asarray(pcd.points)[mask, :])
         pcd.colors = o3d.utility.Vector3dVector(np.asarray(pcd.colors)[mask, :])
+        print(f"[robot_lerf] LERF DINO object cloud after floodfill: {len(pcd.points)}")
         dino_pcd = copy.deepcopy(pcd)
         points, rgbs, relevancies = [], [], []
+        fallback_points, fallback_rgbs, fallback_relevancies = [], [], []
         
         sweep= np.linspace(-np.pi/2,np.pi/2,6,dtype=np.float32)
         for i in sweep:
@@ -413,26 +477,76 @@ class NerfstudioWrapper:
             rgb = torch.reshape(outputs["rgb"], (-1, 3))
             relevancy = torch.reshape(outputs["relevancy_1"], (-1, 1))
             lerf_mask = torch.reshape(lerf_mask, (-1, 1)).squeeze()
-            point = point[torch.nonzero(lerf_mask).squeeze()]
-            rgb = rgb[torch.nonzero(lerf_mask).squeeze()]
-            relevancy = relevancy[torch.nonzero(lerf_mask).squeeze()]
-            points.append(point)
-            rgbs.append(rgb)
-            relevancies.append(relevancy)
+            mask_indices = torch.nonzero(lerf_mask, as_tuple=False).reshape(-1)
+            points.append(point[mask_indices])
+            rgbs.append(rgb[mask_indices])
+            relevancies.append(relevancy[mask_indices])
+
+            fallback_topk = _env_int("ROBOT_LERF_RELAXED_TOPK_PER_VIEW", 256)
+            if fallback_topk > 0:
+                rel_flat = relevancy.squeeze(-1)
+                finite_indices = torch.nonzero(torch.isfinite(rel_flat), as_tuple=False).reshape(-1)
+                positive_indices = finite_indices[rel_flat[finite_indices] > 0]
+                candidate_indices = positive_indices if positive_indices.numel() > 0 else finite_indices
+                if candidate_indices.numel() > 0:
+                    k = min(fallback_topk, candidate_indices.numel())
+                    top_local = torch.topk(rel_flat[candidate_indices], k, largest=True).indices
+                    fallback_indices = candidate_indices[top_local]
+                    fallback_points.append(point[fallback_indices])
+                    fallback_rgbs.append(rgb[fallback_indices])
+                    fallback_relevancies.append(relevancy[fallback_indices])
+
         points = torch.cat(points, dim=0)
         rgbs = torch.cat(rgbs, dim=0)
         relevancies = torch.cat(relevancies, dim=0)
+        min_semantic_points = _env_int("ROBOT_LERF_MIN_SEMANTIC_POINTS", 64)
+        if len(relevancies) < min_semantic_points and fallback_relevancies:
+            relaxed_points = torch.cat(fallback_points, dim=0)
+            relaxed_rgbs = torch.cat(fallback_rgbs, dim=0)
+            relaxed_relevancies = torch.cat(fallback_relevancies, dim=0)
+            if len(relaxed_relevancies) > len(relevancies):
+                print(
+                    "[robot_lerf] Strict LERF+DINO mask was too sparse; "
+                    f"using relaxed LERF top activations ({len(relevancies)} -> {len(relaxed_relevancies)} points)."
+                )
+                points, rgbs, relevancies = relaxed_points, relaxed_rgbs, relaxed_relevancies
         if len(relevancies) == 0:
             print("No points found with positive lerf relevancy")
-            return None, None, None
+            return None, None, None, None, None
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points.double().cpu().numpy())
         pcd.colors = o3d.utility.Vector3dVector(rgbs.double().cpu().numpy())
-        pcd, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=0.00001)
-        relevancies = relevancies - relevancies.min()
-        relevancies = relevancies / relevancies.max()
-        relevancies = relevancies[ind]
-        return pcd, relevancies.cpu().numpy(), dino_pcd, target_points, _
+        raw_semantic_count = len(pcd.points)
+        ind = np.arange(raw_semantic_count, dtype=np.int64)
+        nb_neighbors = min(_env_int("ROBOT_LERF_LERF_OUTLIER_NB_NEIGHBORS", 12), max(raw_semantic_count - 1, 1))
+        std_ratio = _env_float("ROBOT_LERF_LERF_OUTLIER_STD_RATIO", 1.0)
+        min_keep = min(raw_semantic_count, _env_int("ROBOT_LERF_MIN_SEMANTIC_POINTS", 64))
+        if raw_semantic_count > nb_neighbors and not _env_flag("ROBOT_LERF_DISABLE_LERF_OUTLIER", False):
+            filtered_pcd, filtered_ind = pcd.remove_statistical_outlier(
+                nb_neighbors=nb_neighbors,
+                std_ratio=std_ratio,
+            )
+            if len(filtered_pcd.points) >= min_keep:
+                pcd = filtered_pcd
+                ind = np.asarray(filtered_ind, dtype=np.int64)
+            else:
+                print(
+                    "[robot_lerf] Semantic outlier filter was too destructive; "
+                    f"keeping unfiltered cloud ({len(filtered_pcd.points)}/{raw_semantic_count} kept)."
+                )
+        relevancies = relevancies[torch.as_tensor(ind, device=relevancies.device, dtype=torch.long)]
+        rel_min = relevancies.min()
+        rel_span = relevancies.max() - rel_min
+        if float(rel_span.detach().cpu()) > 1e-8:
+            relevancies = (relevancies - rel_min) / rel_span
+        else:
+            print("[robot_lerf] LERF semantic relevancy was flat; using uniform semantic weights.")
+            relevancies = torch.ones_like(relevancies)
+        print(
+            "[robot_lerf] LERF semantic cloud: "
+            f"raw={raw_semantic_count}, kept={len(pcd.points)}, outlier_std={std_ratio}"
+        )
+        return pcd, relevancies.cpu().numpy(), dino_pcd, target_points, None
 
     def create_pointcloud(self) -> Tuple[tr.PointCloud, np.ndarray]:
         self.pipeline.model.step = 0

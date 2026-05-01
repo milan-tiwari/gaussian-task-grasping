@@ -19,9 +19,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        choices=("nerfstudio", "lerf", "gaussian"),
+        choices=("nerfstudio", "lerf", "lerf-lite", "lerf-big", "gaussian"),
         default="gaussian",
-        help="Scene backend to train. 'gaussian' maps to Nerfstudio's splatfacto.",
+        help=(
+            "Scene backend / method to train. "
+            "'gaussian' maps to Nerfstudio's splatfacto. "
+            "'lerf' maps to the default LERF method, while 'lerf-lite' and 'lerf-big' "
+            "select the explicit LERF variants."
+        ),
     )
     parser.add_argument(
         "--steps",
@@ -95,8 +100,14 @@ def normalize_repo_relative(path_str: str, cwd: Path) -> Path:
 
 
 def method_name_for_backend(backend: str) -> str:
-    if backend in {"nerfstudio", "lerf"}:
+    if backend == "nerfstudio":
         return "lerf-lite"
+    if backend == "lerf":
+        return "lerf"
+    if backend == "lerf-lite":
+        return "lerf-lite"
+    if backend == "lerf-big":
+        return "lerf-big"
     if backend == "gaussian":
         return "splatfacto"
     raise ValueError(f"Unknown backend '{backend}'")

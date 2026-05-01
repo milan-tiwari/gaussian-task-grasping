@@ -5,7 +5,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-BUILD_MARKER = "gen_grasp_build_2026_04_19_scores_guard_v1"
+BUILD_MARKER = "gen_grasp_build_2026_04_29_workspace_semantic_bind_v1"
 
 import time
 import traceback
@@ -66,6 +66,198 @@ def _subsample_points_for_display(
     return points[selection], colors[selection]
 
 
+def _parse_translation(value: str | None) -> np.ndarray | None:
+    if not value:
+        return None
+    try:
+        shift = np.fromstring(value, sep=",", dtype=np.float64)
+    except ValueError:
+        return None
+    if shift.shape != (3,):
+        print(
+            "[robot_lerf] Ignoring ROBOT_LERF_SEMANTIC_TRANSLATION; "
+            "expected comma-separated dx,dy,dz."
+        )
+        return None
+    return shift
+
+
+def _semantic_anchor(points: np.ndarray, relevancy: np.ndarray | None) -> np.ndarray:
+    if relevancy is None or len(relevancy) != len(points):
+        return np.median(points, axis=0)
+    scores = np.asarray(relevancy, dtype=np.float64).reshape(-1)
+    finite_mask = np.isfinite(scores)
+    if not np.any(finite_mask):
+        return np.median(points, axis=0)
+    threshold = np.quantile(scores[finite_mask], 0.80)
+    selected = finite_mask & (scores >= threshold)
+    if selected.sum() < min(16, len(points)):
+        return np.median(points[finite_mask], axis=0)
+    return np.median(points[selected], axis=0)
+
+
+def _workspace_anchor(world_pointcloud: tr.PointCloud) -> tuple[np.ndarray, str]:
+    points = np.asarray(world_pointcloud.vertices, dtype=np.float64)
+    colors = _pointcloud_colors(world_pointcloud).astype(np.float64)
+    if colors.size == 0 or len(colors) != len(points):
+        return np.median(points, axis=0), "workspace-median"
+
+    if colors.max() > 1.5:
+        colors = colors / 255.0
+    red, green, blue = colors[:, 0], colors[:, 1], colors[:, 2]
+    redness = red - 0.5 * (green + blue)
+    finite = np.isfinite(redness)
+    if np.any(finite):
+        redness_threshold = np.quantile(redness[finite], 0.92)
+        red_mask = (
+            finite
+            & (red > 0.25)
+            & (red > green)
+            & (red > blue)
+            & (redness >= redness_threshold)
+        )
+        if red_mask.sum() >= 32:
+            return np.median(points[red_mask], axis=0), f"red-color({int(red_mask.sum())} pts)"
+
+    return np.median(points, axis=0), "workspace-median"
+
+
+def _maybe_align_semantics_to_workspace(
+    lerf_points_o3d,
+    dino_points_o3d,
+    lerf_relevancy: np.ndarray,
+    world_pointcloud: tr.PointCloud | None,
+    pick_object_pt,
+    place_point,
+):
+    """Bridge LERF sidecar coordinates onto the Gaussian workspace for scoring."""
+
+    if world_pointcloud is None:
+        return lerf_points_o3d, dino_points_o3d, pick_object_pt, place_point
+
+    semantic_np = np.asarray(lerf_points_o3d, dtype=np.float64)
+    workspace_np = np.asarray(world_pointcloud.vertices, dtype=np.float64)
+    if semantic_np.size == 0 or workspace_np.size == 0:
+        return lerf_points_o3d, dino_points_o3d, pick_object_pt, place_point
+
+    manual_shift = _parse_translation(os.environ.get("ROBOT_LERF_SEMANTIC_TRANSLATION"))
+    auto_align = os.environ.get("ROBOT_LERF_SEMANTIC_AUTO_ALIGN", "1").lower() not in {"0", "false", "no", "off"}
+    if manual_shift is not None:
+        shift = manual_shift
+        reason = "manual ROBOT_LERF_SEMANTIC_TRANSLATION"
+    elif auto_align:
+        semantic_ref = _semantic_anchor(semantic_np, lerf_relevancy)
+        workspace_ref, reference_name = _workspace_anchor(world_pointcloud)
+        shift = workspace_ref - semantic_ref
+        reason = f"auto anchor={reference_name}"
+    else:
+        return lerf_points_o3d, dino_points_o3d, pick_object_pt, place_point
+
+    min_shift = float(os.environ.get("ROBOT_LERF_SEMANTIC_AUTO_ALIGN_MIN_SHIFT", "0.03"))
+    if manual_shift is None and np.linalg.norm(shift) < min_shift:
+        print(
+            "[robot_lerf] Semantic auto-align skipped; "
+            f"shift={np.round(shift, 4).tolist()} is below {min_shift}m."
+        )
+        return lerf_points_o3d, dino_points_o3d, pick_object_pt, place_point
+
+    shifted_semantic_np = semantic_np + shift
+    shifted_dino_np = np.asarray(dino_points_o3d, dtype=np.float64) + shift
+    lerf_points_o3d = o3d.utility.Vector3dVector(shifted_semantic_np)
+    dino_points_o3d = o3d.utility.Vector3dVector(shifted_dino_np)
+    if pick_object_pt is not None:
+        pick_object_pt = np.asarray(pick_object_pt, dtype=np.float64) + shift
+    if place_point is not None:
+        place_point = np.asarray(place_point, dtype=np.float64) + shift
+
+    print(
+        "[robot_lerf] Semantic sidecar alignment applied: "
+        f"shift={np.round(shift, 4).tolist()} ({reason})"
+    )
+    return lerf_points_o3d, dino_points_o3d, pick_object_pt, place_point
+
+
+def _bind_semantics_to_workspace(
+    lerf_points_o3d,
+    dino_points_o3d,
+    lerf_relevancy: np.ndarray,
+    world_pointcloud: tr.PointCloud | None,
+):
+    """Snap sidecar semantic activations onto actual Gaussian workspace points."""
+
+    bind_enabled = os.environ.get("ROBOT_LERF_BIND_SEMANTICS_TO_WORKSPACE", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if not bind_enabled or world_pointcloud is None:
+        return lerf_points_o3d, lerf_relevancy, dino_points_o3d
+
+    semantic_np = np.asarray(lerf_points_o3d, dtype=np.float64)
+    workspace_np = np.asarray(world_pointcloud.vertices, dtype=np.float64)
+    if semantic_np.size == 0 or workspace_np.size == 0:
+        return lerf_points_o3d, lerf_relevancy, dino_points_o3d
+
+    max_dist = float(os.environ.get("ROBOT_LERF_WORKSPACE_BIND_RADIUS", "0.08"))
+    workspace_o3d = o3d.geometry.PointCloud()
+    workspace_o3d.points = o3d.utility.Vector3dVector(workspace_np)
+    workspace_tree = o3d.geometry.KDTreeFlann(workspace_o3d)
+
+    scores = np.asarray(lerf_relevancy, dtype=np.float64).reshape(-1)
+    if len(scores) != len(semantic_np):
+        scores = np.ones(len(semantic_np), dtype=np.float64)
+
+    snapped_scores: dict[int, float] = {}
+    distances = []
+    for point, score in zip(semantic_np, scores):
+        found, indices, sq_distances = workspace_tree.search_knn_vector_3d(point, 1)
+        if found == 0:
+            continue
+        dist = float(np.sqrt(sq_distances[0]))
+        if dist > max_dist:
+            continue
+        workspace_index = int(indices[0])
+        distances.append(dist)
+        snapped_scores[workspace_index] = max(snapped_scores.get(workspace_index, -np.inf), float(score))
+
+    if not snapped_scores:
+        print(
+            "[robot_lerf] Workspace semantic binding found no nearby Gaussian points; "
+            f"keeping sidecar cloud. Increase ROBOT_LERF_WORKSPACE_BIND_RADIUS above {max_dist} if needed."
+        )
+        return lerf_points_o3d, lerf_relevancy, dino_points_o3d
+
+    workspace_indices = np.fromiter(snapped_scores.keys(), dtype=np.int64)
+    snapped_points = workspace_np[workspace_indices]
+    snapped_relevancy = np.array(
+        [snapped_scores[int(index)] for index in workspace_indices],
+        dtype=np.float64,
+    ).reshape(-1, 1)
+
+    dino_np = np.asarray(dino_points_o3d, dtype=np.float64)
+    dino_indices = set()
+    for point in dino_np:
+        found, indices, sq_distances = workspace_tree.search_knn_vector_3d(point, 1)
+        if found == 0:
+            continue
+        if float(np.sqrt(sq_distances[0])) <= max_dist:
+            dino_indices.add(int(indices[0]))
+    snapped_dino = workspace_np[np.fromiter(dino_indices, dtype=np.int64)] if dino_indices else snapped_points
+
+    print(
+        "[robot_lerf] Bound semantic sidecar to Gaussian workspace: "
+        f"semantic_pts={len(semantic_np)} -> {len(snapped_points)}, "
+        f"dino_pts={len(dino_np)} -> {len(snapped_dino)}, "
+        f"radius={max_dist}, median_dist={np.median(distances):.4f}"
+    )
+    return (
+        o3d.utility.Vector3dVector(snapped_points),
+        snapped_relevancy,
+        o3d.utility.Vector3dVector(snapped_dino),
+    )
+
+
 def get_relevancy_pointcloud(scene_backend: SceneBackend, **kwargs):
     """Get relevancy pointcloud, used to get semantic score
 
@@ -81,9 +273,28 @@ def get_relevancy_pointcloud(scene_backend: SceneBackend, **kwargs):
     c2w = scene_backend.visercam_to_model(center_pos_matrix)
     rscam = RealsenseCamera.get_camera(c2w, downscale=1/4)
     lerf_pcd, lerf_relevancy, dino_pcd, pick_object_pt, place_pt = scene_backend.get_lerf_pointcloud(rscam)
-    pick_object_pt = tr.transformations.transform_points(pick_object_pt.unsqueeze(0).cpu().numpy(), scene_backend.applied_transform).squeeze()
-    if place_pt is not None:
-        place_pt = tr.transformations.transform_points(place_pt.unsqueeze(0).cpu().numpy(), scene_backend.applied_transform).squeeze()
+    if lerf_pcd is None or dino_pcd is None:
+        raise RuntimeError("Semantic query returned no valid point clouds.")
+
+    def _to_world_point(point_like):
+        if point_like is None:
+            return None
+        if hasattr(point_like, "detach"):
+            arr = point_like.detach().cpu().numpy()
+        elif hasattr(point_like, "cpu") and hasattr(point_like, "numpy"):
+            arr = point_like.cpu().numpy()
+        else:
+            arr = np.asarray(point_like)
+        arr = np.asarray(arr, dtype=np.float64).reshape(-1)
+        if arr.size < 3:
+            return None
+        return tr.transformations.transform_points(
+            arr[:3].reshape(1, 3),
+            scene_backend.applied_transform,
+        ).squeeze()
+
+    pick_object_pt = _to_world_point(pick_object_pt)
+    place_pt = _to_world_point(place_pt)
     lerf_pcd.points = o3d.utility.Vector3dVector(tr.transformations.transform_points(np.asarray(lerf_pcd.points), scene_backend.applied_transform)) # model pc to world/viser pc
     dino_pcd.points = o3d.utility.Vector3dVector(tr.transformations.transform_points(np.asarray(dino_pcd.points), scene_backend.applied_transform))
     lerf_points_o3d = lerf_pcd.points
@@ -585,6 +796,20 @@ def main(
                 scene_model.set_positives(lerf_word)
                 print("[robot_lerf] Fetching semantic point cloud...")
                 lerf_points_o3d, lerf_relevancy, dino_pcd, pick_object_pt, place_point = get_relevancy_pointcloud(scene_model, table_center=table_center)
+                lerf_points_o3d, dino_pcd, pick_object_pt, place_point = _maybe_align_semantics_to_workspace(
+                    lerf_points_o3d,
+                    dino_pcd,
+                    lerf_relevancy,
+                    world_pointcloud,
+                    pick_object_pt,
+                    place_point,
+                )
+                lerf_points_o3d, lerf_relevancy, dino_pcd = _bind_semantics_to_workspace(
+                    lerf_points_o3d,
+                    dino_pcd,
+                    lerf_relevancy,
+                    world_pointcloud,
+                )
             except NotImplementedError as exc:
                 print(exc)
                 gen_grasp_text.disabled = False
@@ -601,6 +826,23 @@ def main(
                 "[robot_lerf] Semantic query returned: "
                 f"semantic_pts={len(lerf_points_o3d)}, dino_pts={len(dino_pcd)}"
             )
+            semantic_np = np.asarray(lerf_points_o3d)
+            if semantic_np.size > 0:
+                semantic_min = semantic_np.min(axis=0)
+                semantic_max = semantic_np.max(axis=0)
+                print(
+                    "[robot_lerf] Semantic world bounds: "
+                    f"min={np.round(semantic_min, 4).tolist()}, max={np.round(semantic_max, 4).tolist()}"
+                )
+            if world_pointcloud is not None:
+                workspace_np = np.asarray(world_pointcloud.vertices)
+                if workspace_np.size > 0:
+                    workspace_min = workspace_np.min(axis=0)
+                    workspace_max = workspace_np.max(axis=0)
+                    print(
+                        "[robot_lerf] Workspace world bounds: "
+                        f"min={np.round(workspace_min, 4).tolist()}, max={np.round(workspace_max, 4).tolist()}"
+                    )
             colors = lerf_relevancy.squeeze()
             colors = (colors - colors.min()) / (colors.max() - colors.min() + 1e-6)
             colors = matplotlib.colormaps['viridis'](colors)[:, :3]
@@ -658,6 +900,10 @@ def main(
         @update_overall_scores_button.on_click
         def _(_):
             nonlocal grasps_dict, overall_scores
+
+            if grasps is None or len(grasps) == 0:
+                print("[robot_lerf] No grasps are currently loaded; reload the scene before updating scores.")
+                return
 
             lerf_weight = update_overall_scores_slider.value
             geom_weight = 1.0 - lerf_weight
